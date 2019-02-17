@@ -230,7 +230,7 @@ An important detail of the renderer is that it renders __semi-transparent__ circ
    result_b = C_alpha * C_b + (1.0 - C_alpha) * P_b
 </pre>
 
-Notice that composition is not commutative (object X over Y does not look the same as object Y over X), so it's important that the render draw circles in a manner that follows the order they are provided by the application. (You can assume the application provides the circles in depth order.)  For example, consider the two images below.  In the image on the left, the circles are drawn in the correct order.  In the image on the right, the circles are drawn out of order.
+Notice that composition is not commutative (object X over Y does not look the same as object Y over X), so it's important that the render draw circles in a manner that follows the order they are provided by the application. (You can assume the application provides the circles in depth order.)  For example, consider the two images below where is blue circle is drawn OVER a green circle which is drawn OVER a red circle.  In the image on the left, the circles are drawn into the output image in the correct order.  In the image on the right, the circles are drawn in a different order, and the output image does not look correct.
 
 ![Ordering](handout/order.jpg?raw=true "The renderer must be careful to generate output that is the same as what is generated when sequentially drawing all circles in the order provided by the application.")
 
