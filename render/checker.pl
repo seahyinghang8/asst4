@@ -62,7 +62,7 @@ print ("------------\n");
 print ("Score table:\n");
 print ("------------\n");
 
-my $header = sprintf ("| %-15s | %-15s | %-15s | %-15s |\n", "Scene Name", "Ref Time (Tf)", "Your Time (T)", "Score");
+my $header = sprintf ("| %-15s | %-16s | %-15s | %-15s |\n", "Scene Name", "Ref Time (T_ref)", "Your Time (T)", "Score");
 my $dashes = $header;
 $dashes =~ s/./-/g;
 print $dashes;
@@ -92,10 +92,10 @@ foreach my $scene (@score_scene_names){
         $score = 0;
     }
 
-    printf ("| %-15s | %-15s | %-15s | %-15s |\n", "$scene", "$fast_time", "$your_time", "$score");
+    printf ("| %-15s | %-16s | %-15s | %-15s |\n", "$scene", "$fast_time", "$your_time", "$score");
     $total_score += $score;
 }
 print $dashes;
-printf ("| %-15s   %-15s | %-15s | %-15s |\n", "", "", "Total score:",
+printf ("| %-15s   %-16s | %-15s | %-15s |\n", "", "", "Total score:",
     $total_score . "/" . ($perf_points+$correctness_points) * ($#score_scene_names + 1));
 print $dashes;

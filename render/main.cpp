@@ -21,11 +21,12 @@ void usage(const char* progname) {
     printf("Valid scenenames are: rgb, rgby, rand10k, rand100k, biglittle, littlebig, pattern,\n"
            "                      bouncingballs, fireworks, hypnosis, snow, snowsingle\n");
     printf("Program Options:\n");
-    printf("  -b  --bench <START:END>       Benchmark mode, do not create display. Run for frames [START,END)\n");
-    printf("  -c  --check                   Check correctness of output\n");
-    printf("  -f  --file  <FILENAME>        Dump frames in benchmark mode (FILENAME_xxxx.ppm)\n");
     printf("  -r  --renderer <cpuref/cuda>  Select renderer: ref or cuda (default=cuda)\n");
-    printf("  -s  --size  <INT>             Make rendered image <INT>x<INT> pixels (default=%d)\n", DEFAULT_IMAGE_SIZE);
+    printf("  -s  --size  <INT>             Rendered image size: <INT>x<INT> pixels (default=%d)\n", DEFAULT_IMAGE_SIZE);    
+    printf("  -b  --bench <START:END>       Run for frames [START,END) (default=[0,1))\n");
+    printf("  -c  --check                   Check correctness of CUDA output against CPU reference\n");
+    printf("  -i  --interactive             Render output to interactive display\n");
+    printf("  -f  --file  <FILENAME>        Output file name (FILENAME_xxxx.ppm) (default=output)\n");
     printf("  -?  --help                    This message\n");
 }
 
@@ -33,8 +34,8 @@ void usage(const char* progname) {
 int main(int argc, char** argv)
 {
 
-    int benchmarkFrameStart = -1;
-    int benchmarkFrameEnd = -1;
+    int benchmarkFrameStart = 0;
+    int benchmarkFrameEnd = 1;
     int imageSize = DEFAULT_IMAGE_SIZE;
 
     std::string sceneNameStr;
@@ -42,20 +43,22 @@ int main(int argc, char** argv)
     SceneName sceneName;
     bool useRefRenderer = false;
     bool checkCorrectness = false;
-
+    bool interactiveMode = false;
+    
     // parse commandline options ////////////////////////////////////////////
     int opt;
     static struct option long_options[] = {
-        {"help",     0, 0,  '?'},
-        {"check",    0, 0,  'c'},
-        {"bench",    1, 0,  'b'},
-        {"file",     1, 0,  'f'},
-        {"renderer", 1, 0,  'r'},
-        {"size",     1, 0,  's'},
+        {"help",        0, 0,  '?'},
+        {"check",       0, 0,  'c'},
+        {"bench",       1, 0,  'b'},
+	{"interactive", 0, 0,  'i'},
+        {"file",        1, 0,  'f'},
+        {"renderer",    1, 0,  'r'},
+        {"size",        1, 0,  's'},
         {0 ,0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "b:f:r:s:c?", long_options, NULL)) != EOF) {
+    while ((opt = getopt_long(argc, argv, "b:f:r:s:ci?", long_options, NULL)) != EOF) {
 
         switch (opt) {
         case 'b':
@@ -65,6 +68,9 @@ int main(int argc, char** argv)
                 exit(1);
             }
             break;
+	case 'i':
+   	    interactiveMode = true;
+	    break;
         case 'c':
             checkCorrectness = true;
             break;
@@ -166,7 +172,7 @@ int main(int argc, char** argv)
         renderer->loadScene(sceneName);
         renderer->setup();
 
-        if (benchmarkFrameStart >= 0)
+        if (!interactiveMode)
             startBenchmark(renderer, benchmarkFrameStart, benchmarkFrameEnd - benchmarkFrameStart, frameFilename);
         else {
             glutInit(&argc, argv);
