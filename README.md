@@ -219,9 +219,9 @@ algorithm for rendering each frame is:
                 compute color of circle at point
                 blend contribution of circle into image for this pixel
 
-Figure 2 illustrates the basic algorithm for computing circle-pixel coverage using point-in-circle tests. Notice that a circle contributes color to an output pixel only if the pixel's center lies within the circle.
+The figure below illustrates the basic algorithm for computing circle-pixel coverage using point-in-circle tests. Notice that a circle contributes color to an output pixel only if the pixel's center lies within the circle.
 
-![Point in circle test](handout/point_in_circle.jpg?raw=true "Figure 2: A simple algorithm for computing the contribution of a circle to the output image: All pixels within the circle's bounding box are tested for coverage. For each pixel in the bounding box, the pixel is considered to be covered by the circle if its center point (black dots) is contained within the circle. Pixel centers that are inside the circle are colored red. The circle's contribution to the image will be computed only for covered pixels.")
+![Point in circle test](handout/point_in_circle.jpg?raw=true "A simple algorithm for computing the contribution of a circle to the output image: All pixels within the circle's bounding box are tested for coverage. For each pixel in the bounding box, the pixel is considered to be covered by the circle if its center point (black dots) is contained within the circle. Pixel centers that are inside the circle are colored red. The circle's contribution to the image will be computed only for covered pixels.")
 
 An important detail of the renderer is that it renders __semi-transparent__ circles. Therefore, the color of any one pixel is not the color of a single circle, but the result of blending the contributions of all the semi-transparent circles overlapping the pixel (note the "blend contribution" part of the pseudocode above).  The renderer represents the color of a circle via a 4-tuple of red (R), green (G), blue (B), and opacity (alpha) values (RGBA). Alpha = 1 corresponds to a fully opaque circle.  Alpha = 0 corresponds to a fully transparent circle.  To draw a semi-transparent circle with color `(C_r, C_g, C_b, C_alpha)` on top of a pixel with color `(P_r, P_g, P_b)`, the renderer uses the following math:
 <pre>
@@ -232,7 +232,7 @@ An important detail of the renderer is that it renders __semi-transparent__ circ
 
 Notice that composition is not commutative (object X over Y does not look the same as object Y over X), so it's important that the render draw circles in a manner that follows the order they are provided by the application. (You can assume the application provides the circles in depth order.)  For example, consider the two images below.  In the image on the left, the circles are drawn in the correct order.  In the image on the right, the circles are drawn out of order.
 
-![Ordering](handout/order.jpg?raw=true "Figure 3: The renderer must be careful to generate output that is the same as what is generated when sequentially drawing all circles in the order provided by the application.")
+![Ordering](handout/order.jpg?raw=true "The renderer must be careful to generate output that is the same as what is generated when sequentially drawing all circles in the order provided by the application.")
 
 ### CUDA Renderer ###
 
@@ -259,15 +259,15 @@ the current image value, and then writing the pixel's color back to memory.
 circle 1 and circle 2 both contribute to pixel P, any image updates to P due to circle 1 must be applied to the
 image before updates to P due to circle 2. As discussed above, preserving the ordering requirement
 allows for correct rendering of transparent circles. (It has a number of other benefits for graphics
-systems. If curious, talk to Kayvon.) __A key observation is that the definition of order only specifies the order of updates to the same pixel.__  Thus, as shown in Figure 4 below, there are no ordering requirements between circles that do not contribute to the same pixel. These circles can be processed independently.
+systems. If curious, talk to Kayvon.) __A key observation is that the definition of order only specifies the order of updates to the same pixel.__  Thus, as shown below, there are no ordering requirements between circles that do not contribute to the same pixel. These circles can be processed independently.
 
-![Dependencies](handout/dependencies.jpg?raw=true "Figure 4: The contributions of circles 1, 2, and 3 must be applied to overlapped pixels in the order the circles are provided to the renderer.")
+![Dependencies](handout/dependencies.jpg?raw=true "The contributions of circles 1, 2, and 3 must be applied to overlapped pixels in the order the circles are provided to the renderer.")
 
 Since the provided CUDA implementation does not satisfy either of these requirements, the result of not correctly 
 respecting order or atomicity can be seen by running the CUDA renderer implementation on the rgb and circles scenes. 
-You will see horizontal streaks through the resulting images, as shown in Figure 5 below. These streaks will change with each frame.
+You will see horizontal streaks through the resulting images, as shown below. These streaks will change with each frame.
 
-![Order_errors](handout/bug_example.jpg?raw=true "Figure 5: Errors in the output due to lack of atomicity in frame-buffer update (notice streaks in bottom of image).")
+![Order_errors](handout/bug_example.jpg?raw=true "Errors in the output due to lack of atomicity in frame-buffer update (notice streaks in bottom of image).")
 
 ### What You Need To Do ###
 
