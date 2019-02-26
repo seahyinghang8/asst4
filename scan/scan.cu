@@ -27,6 +27,28 @@ static inline int nextPow2(int n) {
     return n;
 }
 
+// perform parallel scan in place
+__global__ void
+upward_scan(int* result, int two_d, int two_dplus1) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index % two_dplus1 != 0) return;
+    result[index + two_dplus1 - 1] += result[index + two_d - 1];
+}
+
+__global__ void
+reset_last(int* result, int N) {
+    result[N - 1] = 0;
+}
+
+__global__ void
+downward_scan(int* result, int two_d, int two_dplus1) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index % two_dplus1 != 0) return;
+    int t = result[index + two_d - 1];
+    result[index + two_d - 1] = result[index + two_dplus1 - 1];
+    result[index + two_dplus1 - 1] += t;
+}
+
 // exclusive_scan --
 //
 // Implementation of an exclusive scan on global memory array `input`,
@@ -54,7 +76,28 @@ void exclusive_scan(int* input, int N, int* result)
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
 
+    // change N to the rounded length
+    int rounded_length = nextPow2(N);
 
+    // hardcoded values that will be changed later
+    const int threadsPerBlock = 512;
+    const int blocks =  (rounded_length + threadsPerBlock - 1) / threadsPerBlock;
+    // upward sweep
+    for (int two_d = 1; two_d < rounded_length / 2; two_d *= 2) {
+        int two_dplus1 = 2 * two_d;
+        upward_scan<<<blocks, threadsPerBlock>>>(result, two_d, two_dplus1);
+        cudaDeviceSynchronize();
+    }
+
+    reset_last<<<1, 1>>>(result, rounded_length);
+    cudaDeviceSynchronize();
+
+    // downward sweep
+    for (int two_d = rounded_length/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2 * two_d;
+        downward_scan<<<blocks, threadsPerBlock>>>(result, two_d, two_dplus1);
+        cudaDeviceSynchronize();
+    }
 }
 
 
