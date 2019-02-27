@@ -10,9 +10,6 @@
 #include <thrust/device_malloc.h>
 #include <thrust/device_free.h>
 
-#include <thrust/sort.h>
-#include <thrust/functional.h>
-
 #include "CycleTimer.h"
 
 #define THREADS_PER_BLOCK 256
@@ -207,29 +204,29 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
 }
 
 
-// set result[i] = 1 and intermediate[i] = index if input at i is a repeat
+// set result[i] = 1 if input at i is a repeat
 __global__ void
-set_repeat(int* input, thrust::device_ptr<int> intermediate, int* result, int length) {
+set_repeat(int* input, int* result, int length) {
     size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     // exit if the index exceeds
     if (index >= (size_t) length - 1) return;
     if (input[index] == input[index + 1]) {
-        *(intermediate + index) = index;
         result[index] = 1;
     } else {
-        *(intermediate + index) = 0;
         result[index] = 0;
     }
 }
 
-// copy N length from thrust ptr to result
+// when there is an increase from input[i] = input[i + 1]
+// then set result[input[i]] = i;
 __global__ void
-copy_from_thrust(thrust::device_ptr<int> input, int* result, int length) {
+identify_index(int* input, int* result, int length) {
     size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     // exit if the index exceeds
-    if (index >= (size_t) length) return;
-    result[index] = *(input + index);
+    if (index >= (size_t) length - 1) return;
+    if (input[index] != input[index + 1]) result[input[index]] = index;
 }
+
 
 // find_repeats --
 //
@@ -251,48 +248,19 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
 
-    // double startTime = CycleTimer::currentSeconds();
-    // Create an intermediate device memory used for holding temporary information
-    thrust::device_ptr<int> device_intermediate = thrust::device_malloc<int>(length);
-    // double endTime = CycleTimer::currentSeconds();
-    // printf("Malloc Time: %.3f ms\n", 1000.f * (endTime - startTime));
-
-    // startTime = CycleTimer::currentSeconds();
     // Create a thread for every single item in the input array
-    int num_repeat_blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    set_repeat<<<num_repeat_blocks, THREADS_PER_BLOCK>>>(device_input, device_intermediate, device_output, length);
+    int num_blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    set_repeat<<<num_blocks, THREADS_PER_BLOCK>>>(device_input, device_output, length);
     cudaDeviceSynchronize();
-    // endTime = CycleTimer::currentSeconds();
-    // printf("Setting Time: %.3f ms\n", 1000.f * (endTime - startTime));
 
-    // startTime = CycleTimer::currentSeconds();
     // Use exclusive scan to find out the total number of repeated elements
     int num_repeats = 0;
-    exclusive_scan(device_output, length, device_output);
-    cudaMemcpy(&num_repeats, device_output + length - 1, sizeof(int), cudaMemcpyDeviceToHost);
-    // endTime = CycleTimer::currentSeconds();
-    // printf("Exclusive Scan Time: %.3f ms\n", 1000.f * (endTime - startTime));
+    exclusive_scan(device_output, length, device_input);
+    // Set num_repeats to be the last value of exclusive scan result
+    cudaMemcpy(&num_repeats, device_input + length - 1, sizeof(int), cudaMemcpyDeviceToHost);
 
-    // startTime = CycleTimer::currentSeconds();
-    // Reorder the device_intermediate array
-    thrust::sort(device_intermediate, device_intermediate + length, thrust::greater<int>());
-    thrust::reverse(device_intermediate, device_intermediate + num_repeats);
-    // endTime = CycleTimer::currentSeconds();
-    // printf("Sorting and reversing Time: %.3f ms\n", 1000.f * (endTime - startTime));
-
-    // startTime = CycleTimer::currentSeconds();
-    // Copy the results from thrust pointer to 
-    int num_copy_blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    copy_from_thrust<<<num_copy_blocks, THREADS_PER_BLOCK>>>(device_intermediate, device_output, num_repeats);
+    identify_index<<<num_blocks, THREADS_PER_BLOCK>>>(device_input, device_output, length);
     cudaDeviceSynchronize();
-    // endTime = CycleTimer::currentSeconds();
-    // printf("Final Copy Time: %.3f ms\n", 1000.f * (endTime - startTime));
-
-    // startTime = CycleTimer::currentSeconds();
-    thrust::device_free(device_intermediate);
-    // endTime = CycleTimer::currentSeconds();
-    // printf("Free Time: %.3f ms\n", 1000.f * (endTime - startTime));
-    
     return num_repeats;
 }
 
