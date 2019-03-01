@@ -569,16 +569,16 @@ __global__ void myKernelRenderCircles() {
     const size_t numCirclesPerIteration = BLOCKSIZE;
     const size_t numCircles = cuConstRendererParams.numCircles;
     
-    if (numCircles < 32) {
-        // check if pixel is within image
-        if (pixelX < imageWidth && pixelY < imageHeight) {
+    // if (numCircles < 32) {
+    //     // check if pixel is within image
+    //     if (pixelX < imageWidth && pixelY < imageHeight) {
 
-            //loop definite circles
-            for (size_t i=0; i < numCircles; i++) {
-                myShadePixel(i, pixelCenterNorm, &color);
-            }
-        }
-    } else {
+    //         //loop definite circles
+    //         for (size_t i=0; i < numCircles; i++) {
+    //             myShadePixel(i, pixelCenterNorm, &color);
+    //         }
+    //     }
+    // } else {
 
         // ensure all the threads reach the start of the loop at the same time
         for (size_t circleIdxStart = 0;
@@ -631,13 +631,58 @@ __global__ void myKernelRenderCircles() {
             }
             __syncthreads();
         }
-    }
+    // }
     if (pixelX < imageWidth && pixelY < imageHeight) {
         *imgPtr = color;
     }
 
 }
 
+
+// mySmallKernelRenderCircles (Ying Hang's parallel and correct version) -- (CUDA device code)
+//
+// Each thread renders a single pixel of the entire image
+// A thread block will perform computation 
+
+__global__ void mySmallKernelRenderCircles() {
+
+    // Get constant values
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    
+    // Set each thread to take on a pixel
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    float4* imgPtr;
+    float4 color;
+    float2 pixelCenterNorm;
+
+    if (pixelX < imageWidth && pixelY < imageHeight) {
+        imgPtr = (float4*) &cuConstRendererParams.imageData[4 * 
+                                (pixelY * imageWidth + pixelX)];
+
+        color = *imgPtr;
+        pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                      invHeight * (static_cast<float>(pixelY) + 0.5f));
+    }
+
+    const size_t numCircles = cuConstRendererParams.numCircles;
+    
+    // check if pixel is within image
+    if (pixelX < imageWidth && pixelY < imageHeight) {
+
+        //loop circles
+        for (size_t i=0; i < numCircles; i++) {
+            myShadePixel(i, pixelCenterNorm, &color);
+        }
+    }
+    if (pixelX < imageWidth && pixelY < imageHeight) {
+        *imgPtr = color;
+    }
+
+}
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -844,6 +889,35 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
+// Each kernel call renders a circle
+__global__ void kernelRenderOneCircle(
+    float screenMinX,
+    float screenMaxX,
+    float screenMinY,
+    float screenMaxY,
+    float invHeight,
+    float invWidth,
+    int circleIdx) {
+
+    int tIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalPixelsNeeded = (screenMaxX - screenMinX) * (screenMaxY - screenMinY);
+    if (tIdx > totalPixelsNeeded) return;
+
+    // x_dimensions
+    int xDim = screenMaxX - screenMinX;
+    // calculate pixel x and pixel y
+    int pixelX = tIdx % xDim + screenMinX;
+    int pixelY = tIdx / xDim + screenMinY;
+    short imageWidth = cuConstRendererParams.imageWidth;
+
+    float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+    // for all pixels in the bonding box
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                         invHeight * (static_cast<float>(pixelY) + 0.5f));
+    shadePixel(circleIdx, pixelCenterNorm, p, imgPtr);
+}
+
 void
 CudaRenderer::render() {
 
@@ -864,7 +938,49 @@ CudaRenderer::render() {
 
     //printf("I have %d threads and I have %d pixels\n",gridDim.x * blockDim.x * gridDim.y * blockDim.y, image->width * image->height);
 
-    myKernelRenderCircles<<<gridDim, blockDim>>>();
+    if (numCircles >= 4) { //dubious ???
+        myKernelRenderCircles<<<gridDim, blockDim>>>();
+    } else {
+        short imageWidth = image->width;
+        short imageHeight = image->height;
+        float invWidth = 1.f / imageWidth;
+        float invHeight = 1.f / imageHeight;
+
+        for (int i = 0; i < numCircles; i++) {
+            // read position and radius
+            float px = position[i * 3];
+            float py = position[i * 3 +1];
+            float rad = radius[i];
+
+            // compute the bounding box of the circle.  This bounding box
+            // is in normalized coordinates
+
+            short minX = static_cast<short>(imageWidth * (px - rad));
+            short maxX = static_cast<short>(imageWidth * (px + rad)) + 1;
+            short minY = static_cast<short>(imageHeight * (py - rad));
+            short maxY = static_cast<short>(imageHeight * (py + rad)) + 1;
+
+            // a bunch of clamps.  Is there a CUDA built-in for this?
+            short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+            short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+            short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+            short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+
+            int totalPixelsNeeded = (screenMaxX - screenMinX) * (screenMaxY - screenMinY);
+            const int THREADS_PER_BLOCK = 64;
+            int num_blocks = (totalPixelsNeeded + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+            kernelRenderOneCircle<<<num_blocks, THREADS_PER_BLOCK>>>(
+                    screenMinX,
+                    screenMaxX,
+                    screenMinY,
+                    screenMaxY,
+                    invHeight,
+                    invWidth,
+                    i);
+            cudaDeviceSynchronize();
+        }
+    }
     cudaDeviceSynchronize();
 
 }
