@@ -14,6 +14,8 @@
 #include "sceneLoader.h"
 #include "util.h"
 
+#include "circleBoxTest.cu_inl"
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -427,6 +429,85 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+
+// myKernelRenderCircles (Ying Hang's parallel and correct version) -- (CUDA device code)
+//
+// Each thread renders a single pixel of the entire image
+// A thread block will perform computation 
+
+__global__ void myKernelRenderCircles() {
+
+    // Get constant values
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    // Compute some values about each thread
+    size_t index = blockDim.x * threadIdx.y + threadIdx.x;
+    size_t numThreadsPerBlock = blockDim.x * blockDim.y;
+    // Get the left, right, top and bottom of the section
+    float boxL = static_cast<float>(blockIdx.x) / gridDim.x;
+    float boxR = boxL + static_cast<float>(blockDim.x + 1) / imageWidth;
+    float boxT = static_cast<float>(blockIdx.y) / gridDim.y;
+    float boxB = boxL + static_cast<float>(blockDim.y + 1) / imageHeight;
+    // Set each thread to take on a pixel
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    // Set constants to look at a certain number of circles per iteration
+    const size_t numCirclesPerIteration = 1024;
+    //const size_t numCirclesPerIteration = 2; // just to test if for loop is working
+    const size_t numCircles = cuConstRendererParams.numCircles;
+
+    // ensure all the threads reach the start of the loop at the same time
+    for (size_t circleIdxStart = 0;
+        circleIdxStart < numCircles;
+        circleIdxStart += numCirclesPerIteration) {
+
+        // first figure out all the circles that are inside the section
+        // all the threads will work together in parallel
+
+        // using shared memory to mark if a circle is in the given section
+        __shared__ bool inSection[numCirclesPerIteration];
+
+        size_t maxNumCircles = (numCircles < circleIdxStart + numCirclesPerIteration) ?
+                                numCircles - circleIdxStart :
+                                numCirclesPerIteration;
+
+        for (size_t i = index; i < maxNumCircles; i += numThreadsPerBlock) {
+            // Get the position and radius of the circle
+            size_t circleIdx = i + circleIdxStart;
+            float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+            float rad = cuConstRendererParams.radius[circleIdx];
+
+            inSection[i] = circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB);
+        }
+
+        // now that the thread block has figured out which circles are inside the section
+        __syncthreads();
+
+
+        // check if pixel is out of the image size
+        if (pixelX < imageWidth || pixelY < imageHeight) {
+            // now loop through inSection to see if a circle is in the section
+            for (size_t i = 0; i < maxNumCircles; i++) {
+                if (inSection[i]) {
+                    // if circle is in the section, figure out if the circle intersects with the thread's pixel
+                    size_t circleIdx = i + circleIdxStart;
+                    float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+                    // find the corresponding pixel and image data and then shade it
+                    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * 
+                        (pixelY * imageWidth + pixelX)]);
+                    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                         invHeight * (static_cast<float>(pixelY) + 0.5f));
+                    shadePixel(circleIdx, pixelCenterNorm, p, imgPtr);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -637,9 +718,23 @@ void
 CudaRenderer::render() {
 
     // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+    // dim3 blockDim(256, 1);
+    // dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    // kernelRenderCircles<<<gridDim, blockDim>>>();
+
+
+    // NOTE: Ying Hang's Modified Version
+    // 16 * 16 = 256 threads per block is a healthy number
+    // each block handles a 16x16 section of the image
+    dim3 blockDim(16, 16);
+    // the whole image is divided into 16x16 sections
+    size_t gridDimX = (image->width + blockDim.x - 1) / blockDim.x;
+    size_t gridDimY = (image->height + blockDim.y - 1) / blockDim.y;
+    dim3 gridDim(gridDimX, gridDimY);
+
+    //printf("I have %d threads and I have %d pixels\n",gridDim.x * blockDim.x * gridDim.y * blockDim.y, image->width * image->height);
+
+    myKernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }
