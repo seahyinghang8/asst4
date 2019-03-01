@@ -447,16 +447,18 @@ __global__ void myKernelRenderCircles() {
     size_t numThreadsPerBlock = blockDim.x * blockDim.y;
     // Get the left, right, top and bottom of the section
     float boxL = static_cast<float>(blockIdx.x) / gridDim.x;
-    float boxR = boxL + static_cast<float>(blockDim.x + 1) / imageWidth;
-    float boxT = static_cast<float>(blockIdx.y) / gridDim.y;
-    float boxB = boxL + static_cast<float>(blockDim.y + 1) / imageHeight;
+    float boxR = boxL + static_cast<float>(blockDim.x) / imageWidth;
+    float boxB = static_cast<float>(blockDim.y) / imageHeight;
+    float boxT = boxB + static_cast<float>(blockIdx.y) / gridDim.y;
+    
     // Set each thread to take on a pixel
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
     // Set constants to look at a certain number of circles per iteration
-    const size_t numCirclesPerIteration = 1024;
-    //const size_t numCirclesPerIteration = 2; // just to test if for loop is working
+    const size_t numCirclesPerIteration = 256;
     const size_t numCircles = cuConstRendererParams.numCircles;
+    // using shared memory to store all the indices of the overlapping circle
+    __shared__ bool inSection[numCirclesPerIteration];
 
     // ensure all the threads reach the start of the loop at the same time
     for (size_t circleIdxStart = 0;
@@ -466,8 +468,6 @@ __global__ void myKernelRenderCircles() {
         // first figure out all the circles that are inside the section
         // all the threads will work together in parallel
 
-        // using shared memory to mark if a circle is in the given section
-        __shared__ bool inSection[numCirclesPerIteration];
 
         size_t maxNumCircles = (numCircles < circleIdxStart + numCirclesPerIteration) ?
                                 numCircles - circleIdxStart :
@@ -725,9 +725,9 @@ CudaRenderer::render() {
 
 
     // NOTE: Ying Hang's Modified Version
-    // 16 * 16 = 256 threads per block is a healthy number
+    // 32 * 32 = 1024 threads per block is a healthy number
     // each block handles a 16x16 section of the image
-    dim3 blockDim(16, 16);
+    dim3 blockDim(32, 32);
     // the whole image is divided into 16x16 sections
     size_t gridDimX = (image->width + blockDim.x - 1) / blockDim.x;
     size_t gridDimY = (image->height + blockDim.y - 1) / blockDim.y;
