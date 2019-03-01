@@ -32,11 +32,11 @@
 // NOTE: scan assumes that every 32 adjacent linear thread indices 
 // (0-31, 32-63, ...) form a warp, which means they execute in lockstep.
 
-// If you do linearThreadIndex = threadIdx.x * blockDim.x + threadIdx.y;
+// If you do linearThreadIndex = threadIdx.x * blockDim.y + threadIdx.y;
 // you will get a linear thread index, but it won't be sorted into warps,
 // which will break scan!
 
-// int linearThreadIndex =  threadIdx.y * blockDim.y + threadIdx.x;
+// int linearThreadIndex =  threadIdx.y * blockDim.x + threadIdx.x;
 
 // __shared__ uint prefixSumInput[BLOCKSIZE];
 // __shared__ uint prefixSumOutput[BLOCKSIZE];

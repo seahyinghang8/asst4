@@ -14,7 +14,12 @@
 #include "sceneLoader.h"
 #include "util.h"
 
+#define BLOCKDIM 32
+#define BLOCKSIZE (BLOCKDIM * BLOCKDIM)
+#define SCAN_BLOCK_DIM BLOCKSIZE
+
 #include "circleBoxTest.cu_inl"
+#include "exclusiveScan.cu_inl"
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
@@ -58,6 +63,44 @@ __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 #include "noiseCuda.cu_inl"
 #include "lookupColor.cu_inl"
 
+__inline__ __device__ void
+sharedMemInclusiveScan(int threadIndex, uint* sInput, uint* sOutput, volatile uint* sScratch, uint size)
+{
+    if (size > WARP_SIZE) {
+
+        uint idata = sInput[threadIndex];
+
+        //Bottom-level inclusive warp scan
+        uint warpResult = warpScanInclusive(threadIndex, idata, sScratch, WARP_SIZE);
+
+        // Save top elements of each warp for exclusive warp scan sync
+        // to wait for warp scans to complete (because s_Data is being
+        // overwritten)
+        __syncthreads();
+
+        if ( (threadIndex & (WARP_SIZE - 1)) == (WARP_SIZE - 1) )
+            sScratch[threadIndex >> LOG2_WARP_SIZE] = warpResult;
+
+        // wait for warp scans to complete
+        __syncthreads();
+
+        if ( threadIndex < (SCAN_BLOCK_DIM / WARP_SIZE)) {
+            // grab top warp elements
+            uint val = sScratch[threadIndex];
+            // calculate exclusive scan and write back to shared memory
+            sScratch[threadIndex] = warpScanExclusive(threadIndex, val, sScratch, size >> LOG2_WARP_SIZE);
+        }
+
+        //return updated warp scans with exclusive scan results
+        __syncthreads();
+
+        sOutput[threadIndex] = warpResult + sScratch[threadIndex >> LOG2_WARP_SIZE];
+
+    } else if (threadIndex < WARP_SIZE) {
+        uint idata = sInput[threadIndex];
+        sOutput[threadIndex] = warpScanInclusive(threadIndex, idata, sScratch, size);
+    }
+}
 
 // kernelClearImageSnowflake -- (CUDA device code)
 //
@@ -429,6 +472,55 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+__inline__ __device__ void
+checkConservativeCircles(float boxL, float boxR, float boxB, float boxT, size_t circleIdx, size_t tIdx, size_t numCircles, uint* inSection) {
+    // Get the position and radius of the circle
+
+    if (circleIdx >= numCircles) {
+        inSection[tIdx] = 0;
+    } else {
+        float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+        float rad = cuConstRendererParams.radius[circleIdx];
+
+        inSection[tIdx] = static_cast<uint> (circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB));
+    }
+}
+
+__inline__ __device__ void
+findConservativeCircles(size_t tIdx, uint* inclusiveOutput, uint* probableCircles) {
+    if (tIdx == 0) {
+        if (inclusiveOutput[0] == 1) 
+            probableCircles[0] = 0;
+    } else if (inclusiveOutput[tIdx] == (inclusiveOutput[tIdx-1]+1)) {
+        probableCircles[inclusiveOutput[tIdx-1]] = tIdx;
+    }
+}
+
+__inline__ __device__ void
+checkDefiniteCircles(float boxL, float boxR, float boxB, float boxT,
+                     uint circleIdx, size_t tIdx, uint* inSection) {
+
+    float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+    float rad = cuConstRendererParams.radius[circleIdx];
+    inSection[tIdx] = static_cast<uint> (circleInBox(p.x, p.y, rad, boxL, boxR, boxT, boxB));
+}
+
+__inline__ __device__ void
+findDefiniteCircles(size_t tIdx, uint* inclusiveOutput, uint* definiteCircles, uint* probableCircles) {
+    if (tIdx == 0) {
+        if (inclusiveOutput[0] == 1) 
+            definiteCircles[0] = probableCircles[0];
+    } else if (inclusiveOutput[tIdx] == (inclusiveOutput[tIdx-1]+1)) {
+        definiteCircles[inclusiveOutput[tIdx-1]] = probableCircles[tIdx];
+    }
+}
+
+__inline__ __device__ void
+myShadePixel(size_t circleIdx, float2 pixelCenterNorm, float4* imgPtr) {
+    float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
+    shadePixel(circleIdx, pixelCenterNorm, p, imgPtr);
+}
+
 
 // myKernelRenderCircles (Ying Hang's parallel and correct version) -- (CUDA device code)
 //
@@ -442,23 +534,38 @@ __global__ void myKernelRenderCircles() {
     short imageHeight = cuConstRendererParams.imageHeight;
     float invWidth = 1.f / imageWidth;
     float invHeight = 1.f / imageHeight;
+
     // Compute some values about each thread
-    size_t index = blockDim.x * threadIdx.y + threadIdx.x;
-    size_t numThreadsPerBlock = blockDim.x * blockDim.y;
+    size_t tIdx = blockDim.x * threadIdx.y + threadIdx.x;
+
+    if (blockIdx.x == 0 && blockIdx.y == 0) {
+        if (tIdx == 0) {
+            printf("imageWidth: %hi; imageheight: %hi\n", imageWidth, imageHeight);
+        }
+    }
     // Get the left, right, top and bottom of the section
     float boxL = static_cast<float>(blockIdx.x) / gridDim.x;
     float boxR = boxL + static_cast<float>(blockDim.x) / imageWidth;
-    float boxB = static_cast<float>(blockDim.y) / imageHeight;
-    float boxT = boxB + static_cast<float>(blockIdx.y) / gridDim.y;
+    float boxB = static_cast<float>(blockIdx.y) / gridDim.y;
+    float boxT = boxB + static_cast<float>(blockDim.y) / imageHeight;
+
+    __shared__ uint inSection[BLOCKSIZE];
+    __shared__ uint inclusiveOutput[BLOCKSIZE];
+    __shared__ uint probableCircles[BLOCKSIZE];
+    __shared__ uint scratchPad[2*BLOCKSIZE];
     
     // Set each thread to take on a pixel
     int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
     int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    float4* imgPtr = (float4*) &cuConstRendererParams.imageData[4 * 
+                                     (pixelY * imageWidth + pixelX)];
+    float4 color = *imgPtr;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+            invHeight * (static_cast<float>(pixelY) + 0.5f));
+
     // Set constants to look at a certain number of circles per iteration
-    const size_t numCirclesPerIteration = 256;
+    const size_t numCirclesPerIteration = BLOCKSIZE;
     const size_t numCircles = cuConstRendererParams.numCircles;
-    // using shared memory to store all the indices of the overlapping circle
-    __shared__ bool inSection[numCirclesPerIteration];
 
     // ensure all the threads reach the start of the loop at the same time
     for (size_t circleIdxStart = 0;
@@ -468,44 +575,72 @@ __global__ void myKernelRenderCircles() {
         // first figure out all the circles that are inside the section
         // all the threads will work together in parallel
 
+        size_t circleIdx = tIdx + circleIdxStart;
+        checkConservativeCircles(boxL, boxR, boxB, boxT, circleIdx, tIdx, numCircles, inSection);
+        __syncthreads();
+        sharedMemInclusiveScan(tIdx, inSection, inclusiveOutput, scratchPad, BLOCKSIZE);
+        __syncthreads();
+        findConservativeCircles(tIdx, inclusiveOutput, probableCircles);
+        size_t numConservativeCircles = inclusiveOutput[BLOCKSIZE-1];
 
-        size_t maxNumCircles = (numCircles < circleIdxStart + numCirclesPerIteration) ?
-                                numCircles - circleIdxStart :
-                                numCirclesPerIteration;
-
-        for (size_t i = index; i < maxNumCircles; i += numThreadsPerBlock) {
-            // Get the position and radius of the circle
-            size_t circleIdx = i + circleIdxStart;
-            float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
-            float rad = cuConstRendererParams.radius[circleIdx];
-
-            inSection[i] = circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB);
+        __syncthreads();
+        
+        // check definitive circles
+        if (tIdx >= numConservativeCircles) {
+            inSection[tIdx] = 0;
+        } else {
+            checkDefiniteCircles(boxL, boxR, boxB, boxT, probableCircles[tIdx], tIdx, inSection);
         }
-
-        // now that the thread block has figured out which circles are inside the section
+        __syncthreads();
+        sharedMemInclusiveScan(tIdx, inSection, inclusiveOutput, scratchPad, BLOCKSIZE);
+        __syncthreads();
+/*****************************************************************************/
+/**                         RENAMING ARRAY!!!!!                             **/
+/*****************************************************************************/
+        uint* definiteCircles = inSection;
+        findDefiniteCircles(tIdx, inclusiveOutput, definiteCircles, probableCircles);
+        size_t numDefiniteCircles = inclusiveOutput[numConservativeCircles-1];
+        //if (tIdx == 0)
+            //printf("size: %lu\n", numConservativeCircles);
         __syncthreads();
 
+        // now that the thread block has figured out which circles are inside the section
+        // now each thread represents a pixel
 
         // check if pixel is out of the image size
         if (pixelX < imageWidth || pixelY < imageHeight) {
-            // now loop through inSection to see if a circle is in the section
-            for (size_t i = 0; i < maxNumCircles; i++) {
-                if (inSection[i]) {
-                    // if circle is in the section, figure out if the circle intersects with the thread's pixel
-                    size_t circleIdx = i + circleIdxStart;
-                    float3 p = *(float3*)(&cuConstRendererParams.position[circleIdx * 3]);
-                    // find the corresponding pixel and image data and then shade it
-                    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * 
-                        (pixelY * imageWidth + pixelX)]);
-                    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-                                                         invHeight * (static_cast<float>(pixelY) + 0.5f));
-                    shadePixel(circleIdx, pixelCenterNorm, p, imgPtr);
-                }
+
+            //loop definite circles
+            for (size_t i=0; i < numConservativeCircles; i++) {
+
+                size_t circleIdx = probableCircles[i];
+                myShadePixel(circleIdx, pixelCenterNorm, &color);
             }
         }
-
         __syncthreads();
     }
+    /*__shared__ uint x[1024];
+    __shared__ uint o[1024];
+    if (blockIdx.x == 0 && blockIdx.y == 0) {
+        if (tIdx == 0) {
+            printf("block size: %d\n", BLOCKSIZE);
+            for (uint i =0; i < 1024 ; i++) {
+                x[i] = i;
+            }
+        }
+        __syncthreads();
+        sharedMemInclusiveScan((int)tIdx, x, o, scratchPad, 1024);
+        if (tIdx == 0) {
+            for (uint i =0; i < 1024 ; i++) {
+                printf("iscan %u %u: %u\n", i, x[i], o[i]);
+            }
+            printf("address: %x\n", x);
+        }
+    } */
+    if (pixelX < imageWidth || pixelY < imageHeight) {
+        *imgPtr = color;
+    }
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -723,12 +858,11 @@ CudaRenderer::render() {
 
     // kernelRenderCircles<<<gridDim, blockDim>>>();
 
-
     // NOTE: Ying Hang's Modified Version
     // 32 * 32 = 1024 threads per block is a healthy number
-    // each block handles a 16x16 section of the image
-    dim3 blockDim(32, 32);
-    // the whole image is divided into 16x16 sections
+    // each block handles a 32x32 section of the image
+    dim3 blockDim(BLOCKDIM, BLOCKDIM);
+    // the whole image is divided into 32x32 sections
     size_t gridDimX = (image->width + blockDim.x - 1) / blockDim.x;
     size_t gridDimY = (image->height + blockDim.y - 1) / blockDim.y;
     dim3 gridDim(gridDimX, gridDimY);
@@ -737,4 +871,6 @@ CudaRenderer::render() {
 
     myKernelRenderCircles<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
+
 }
+
