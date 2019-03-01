@@ -487,12 +487,12 @@ checkConservativeCircles(float boxL, float boxR, float boxB, float boxT, size_t 
 }
 
 __inline__ __device__ void
-findConservativeCircles(size_t tIdx, uint* inclusiveOutput, uint* probableCircles) {
+findConservativeCircles(size_t tIdx, size_t circleIdx, uint* inclusiveOutput, uint* probableCircles) {
     if (tIdx == 0) {
         if (inclusiveOutput[0] == 1) 
-            probableCircles[0] = 0;
+            probableCircles[0] = circleIdx;
     } else if (inclusiveOutput[tIdx] == (inclusiveOutput[tIdx-1]+1)) {
-        probableCircles[inclusiveOutput[tIdx-1]] = tIdx;
+        probableCircles[inclusiveOutput[tIdx-1]] = circleIdx;
     }
 }
 
@@ -538,11 +538,6 @@ __global__ void myKernelRenderCircles() {
     // Compute some values about each thread
     size_t tIdx = blockDim.x * threadIdx.y + threadIdx.x;
 
-    if (blockIdx.x == 0 && blockIdx.y == 0) {
-        if (tIdx == 0) {
-            printf("imageWidth: %hi; imageheight: %hi\n", imageWidth, imageHeight);
-        }
-    }
     // Get the left, right, top and bottom of the section
     float boxL = static_cast<float>(blockIdx.x) / gridDim.x;
     float boxR = boxL + static_cast<float>(blockDim.x) / imageWidth;
@@ -576,11 +571,12 @@ __global__ void myKernelRenderCircles() {
         // all the threads will work together in parallel
 
         size_t circleIdx = tIdx + circleIdxStart;
+
         checkConservativeCircles(boxL, boxR, boxB, boxT, circleIdx, tIdx, numCircles, inSection);
         __syncthreads();
         sharedMemInclusiveScan(tIdx, inSection, inclusiveOutput, scratchPad, BLOCKSIZE);
         __syncthreads();
-        findConservativeCircles(tIdx, inclusiveOutput, probableCircles);
+        findConservativeCircles(tIdx, circleIdx, inclusiveOutput, probableCircles);
         size_t numConservativeCircles = inclusiveOutput[BLOCKSIZE-1];
 
         __syncthreads();
@@ -611,9 +607,10 @@ __global__ void myKernelRenderCircles() {
         if (pixelX < imageWidth || pixelY < imageHeight) {
 
             //loop definite circles
-            for (size_t i=0; i < numConservativeCircles; i++) {
+            for (size_t i=0; i < numDefiniteCircles; i++) {
 
-                size_t circleIdx = probableCircles[i];
+                size_t circleIdx = definiteCircles[i];
+
                 myShadePixel(circleIdx, pixelCenterNorm, &color);
             }
         }
@@ -637,6 +634,12 @@ __global__ void myKernelRenderCircles() {
             printf("address: %x\n", x);
         }
     } */
+    if (blockIdx.x == 0 && blockIdx.y == 0 && tIdx == 32) {
+        color.x = 0;
+        color.y = 0;
+        color.z = 0;
+        color.w = 0;
+    }
     if (pixelX < imageWidth || pixelY < imageHeight) {
         *imgPtr = color;
     }
